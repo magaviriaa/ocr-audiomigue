@@ -1,187 +1,153 @@
-import streamlit as st
 import os
 import time
 import glob
-import os
 import cv2
 import numpy as np
 import pytesseract
+import streamlit as st
 from PIL import Image
 from gtts import gTTS
-from googletrans import Translator
 
+# traducción estable (reemplaza a googletrans)
+try:
+    from deep_translator import GoogleTranslator
+except ModuleNotFoundError:
+    import sys, subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "deep-translator"])
+    from deep_translator import GoogleTranslator
 
-text=" "
-
-def text_to_speech(input_language, output_language, text, tld):
-    translation = translator.translate(text, src=input_language, dest=output_language)
-    trans_text = translation.text
-    tts = gTTS(trans_text, lang=output_language, tld=tld, slow=False)
-    try:
-        my_file_name = text[0:20]
-    except:
-        my_file_name = "audio"
-    tts.save(f"temp/{my_file_name}.mp3")
-    return my_file_name, trans_text
-
-
-
-
-def remove_files(n):
-    mp3_files = glob.glob("temp/*mp3")
-    if len(mp3_files) != 0:
-        now = time.time()
-        n_days = n * 86400
-        for f in mp3_files:
-            if os.stat(f).st_mtime < now - n_days:
+# ---------- utilidades ----------
+def remove_files(days: int = 7):
+    os.makedirs("temp", exist_ok=True)
+    mp3_files = glob.glob("temp/*.mp3")
+    if not mp3_files:
+        return
+    now = time.time()
+    ttl = days * 86400
+    for f in mp3_files:
+        try:
+            if os.stat(f).st_mtime < now - ttl:
                 os.remove(f)
-                print("Deleted ", f)
+        except FileNotFoundError:
+            pass
 
+def safe_filename(s: str, maxlen: int = 20) -> str:
+    base = (s or "audio").strip()[:maxlen]
+    base = "".join(ch for ch in base if ch.isalnum() or ch in (" ", "-", "_")).strip()
+    return base or "audio"
+
+def translate_text(text: str, src: str, dest: str) -> str:
+    if not text:
+        return ""
+    # deep-translator usa 'zh-CN'
+    if dest.lower() == "zh-cn": dest = "zh-CN"
+    if src.lower() == "zh-cn":  src  = "zh-CN"
+    return GoogleTranslator(source=src, target=dest).translate(text)
+
+def text_to_speech(input_language: str, output_language: str, text: str, tld: str):
+    if not text:
+        return None, "No se detectó texto para convertir."
+    trans_text = translate_text(text, src=input_language, dest=output_language) or text
+    tts = gTTS(trans_text, lang=output_language, tld=tld, slow=False)
+    os.makedirs("temp", exist_ok=True)
+    file_name = safe_filename(text)
+    out_path = f"temp/{file_name}.mp3"
+    tts.save(out_path)
+    return file_name, trans_text
 
 remove_files(7)
-  
 
+# ---------- UI ----------
+st.title("Swiftie OCR — Caza de letras")
+st.subheader("Elige la fuente de la imagen (cámara o archivo), detecta el texto y conviértelo en audio (Taylor’s Version)")
 
+# Cámara / archivo
+cam_ = st.checkbox("Usar cámara")
+if cam_:
+    img_file_buffer = st.camera_input("Toma una foto")
+else:
+    img_file_buffer = None
 
-st.title("Reconocimiento Óptico de Caracteres")
-st.subheader("Elige la fuente de la imágen, esta puede venir de la cámara o cargando un archivo")
-
-cam_ = st.checkbox("Usar Cámara")
-
-if cam_ :
-   img_file_buffer = st.camera_input("Toma una Foto")
-else :
-   img_file_buffer = None
-   
 with st.sidebar:
-      st.subheader("Procesamiento para Cámara")
-      filtro = st.radio("Filtro para imagen con cámara",('Sí', 'No'))
+    st.subheader("Procesamiento para cámara")
+    filtro = st.radio("Filtro para imagen con cámara", ("Con filtro", "Sin filtro"))
 
-bg_image = st.file_uploader("Cargar Imagen:", type=["png", "jpg"])
+bg_image = st.file_uploader("Cargar imagen:", type=["png", "jpg", "jpeg"])
+
+# Texto extraído (variable compartida)
+texto_detectado = ""
+
+# ---- Si suben archivo
 if bg_image is not None:
-    uploaded_file=bg_image
-    st.image(uploaded_file, caption='Imagen cargada.', use_container_width=True)
-    
-    # Guardar la imagen en el sistema de archivos
-    with open(uploaded_file.name, 'wb') as f:
-        f.write(uploaded_file.read())
-    
-    st.success(f"Imagen guardada como {uploaded_file.name}")
-    img_cv = cv2.imread(f'{uploaded_file.name}')
-    img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-    text= pytesseract.image_to_string(img_rgb)
-st.write(text)  
-    
-      
+    st.image(bg_image, caption='Imagen cargada', use_container_width=True)
+    # Leer bytes y decodificar con OpenCV sin escribir a disco
+    bytes_data = bg_image.getvalue()
+    cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+    img_rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+    texto_detectado = pytesseract.image_to_string(img_rgb)
+    st.write(texto_detectado)
+
+# ---- Si usan cámara
 if img_file_buffer is not None:
-    # To read image file buffer with OpenCV:
     bytes_data = img_file_buffer.getvalue()
     cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
 
-    
-    if filtro == 'Con Filtro':
-         cv2_img=cv2.bitwise_not(cv2_img)
-    else:
-        cv2_img= cv2_img
-          
-        
+    if filtro == "Con filtro":
+        # inversión simple que a veces mejora contraste para OCR
+        cv2_img = cv2.bitwise_not(cv2_img)
+
     img_rgb = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-    text=pytesseract.image_to_string(img_rgb) 
-    st.write(text) 
+    texto_detectado = pytesseract.image_to_string(img_rgb)
+    st.write(texto_detectado)
 
+# ---------- Sidebar: traducción + TTS ----------
 with st.sidebar:
-      st.subheader("Parámetros de traducción")
-      
-      try:
-          os.mkdir("temp")
-      except:
-          pass
-      #st.title("Text to speech")
-      translator = Translator()
-      
-      #text = st.text_input("Enter text")
-      in_lang = st.selectbox(
-          "Seleccione el lenguaje de entrada",
-          ("Ingles", "Español", "Bengali", "koreano", "Mandarin", "Japones"),
-      )
-      if in_lang == "Ingles":
-          input_language = "en"
-      elif in_lang == "Español":
-          input_language = "es"
-      elif in_lang == "Bengali":
-          input_language = "bn"
-      elif in_lang == "koreano":
-          input_language = "ko"
-      elif in_lang == "Mandarin":
-          input_language = "zh-cn"
-      elif in_lang == "Japones":
-          input_language = "ja"
-      
-      out_lang = st.selectbox(
-          "Select your output language",
-          ("Ingles", "Español", "Bengali", "koreano", "Mandarin", "Japones"),
-      )
-      if out_lang == "Ingles":
-          output_language = "en"
-      elif out_lang == "Español":
-          output_language = "es"
-      elif out_lang == "Bengali":
-          output_language = "bn"
-      elif out_lang == "koreano":
-          output_language = "ko"
-      elif out_lang == "Chinese":
-          output_language = "zh-cn"
-      elif out_lang == "Japones":
-          output_language = "ja"
-      
-      english_accent = st.selectbox(
-          "Seleccione el acento",
-          (
-              "Default",
-              "India",
-              "United Kingdom",
-              "United States",
-              "Canada",
-              "Australia",
-              "Ireland",
-              "South Africa",
-          ),
-      )
-      
-      if english_accent == "Default":
-          tld = "com"
-      elif english_accent == "India":
-          tld = "co.in"
-      
-      elif english_accent == "United Kingdom":
-          tld = "co.uk"
-      elif english_accent == "United States":
-          tld = "com"
-      elif english_accent == "Canada":
-          tld = "ca"
-      elif english_accent == "Australia":
-          tld = "com.au"
-      elif english_accent == "Ireland":
-          tld = "ie"
-      elif english_accent == "South Africa":
-          tld = "co.za"
+    st.subheader("Parámetros de traducción y voz")
 
-      display_output_text = st.checkbox("Mostrar texto")
+    lang_options = ["Inglés", "Español", "Bengali", "Coreano", "Mandarín", "Japonés"]
+    lang_code = {
+        "Inglés": "en",
+        "Español": "es",
+        "Bengali": "bn",
+        "Coreano": "ko",
+        "Mandarín": "zh-cn",
+        "Japonés": "ja",
+    }
 
-      if st.button("convert"):
-          result, output_text = text_to_speech(input_language, output_language, text, tld)
-          audio_file = open(f"temp/{result}.mp3", "rb")
-          audio_bytes = audio_file.read()
-          st.markdown(f"## Tu audio:")
-          st.audio(audio_bytes, format="audio/mp3", start_time=0)
-      
-          if display_output_text:
-              st.markdown(f"## Texto de salida:")
-              st.write(f" {output_text}")
+    in_lang = st.selectbox("Lenguaje de entrada", lang_options, index=1)
+    input_language = lang_code[in_lang]
 
+    out_lang = st.selectbox("Lenguaje de salida", lang_options, index=0)
+    output_language = lang_code[out_lang]
 
+    english_accent = st.selectbox(
+        "Acento (si eliges inglés como salida)",
+        ("Default", "India", "United Kingdom", "United States", "Canada", "Australia", "Ireland", "South Africa"),
+    )
+    tld_map = {
+        "Default": "com",
+        "India": "co.in",
+        "United Kingdom": "co.uk",
+        "United States": "com",
+        "Canada": "ca",
+        "Australia": "com.au",
+        "Ireland": "ie",
+        "South Africa": "co.za",
+    }
+    tld = tld_map.get(english_accent, "com")
 
+    display_output_text = st.checkbox("Mostrar texto traducido")
 
- 
-    
-    
+    if st.button("Convertir a audio"):
+        file_id, output_text = text_to_speech(input_language, output_language, texto_detectado, tld)
+        if file_id is None:
+            st.warning(output_text)  # mensaje de error si no hay texto
+        else:
+            with open(f"temp/{file_id}.mp3", "rb") as audio_file:
+                audio_bytes = audio_file.read()
+            st.markdown("## Tu audio:")
+            st.audio(audio_bytes, format="audio/mp3", start_time=0)
+
+            if display_output_text:
+                st.markdown("## Texto de salida:")
+                st.write(output_text)
